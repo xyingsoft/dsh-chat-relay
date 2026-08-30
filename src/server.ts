@@ -38,6 +38,13 @@ import {
   signOutHandler,
   type IdentityCommandDeps,
 } from './http/identity-commands.js'
+import {
+  getVisibilityHandler,
+  heartbeatHandler,
+  presenceQueryHandler,
+  setVisibilityHandler,
+  type PresenceCommandDeps,
+} from './http/presence-commands.js'
 import { createSignatureGuard } from './http/signature-guard.js'
 import {
   ackMessagesHandler,
@@ -250,6 +257,13 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     ...(guard === undefined ? {} : { guard }),
   }
   const identityDeps: IdentityCommandDeps = { database, expectedOrigin, authenticate, now, newId }
+  const presenceDeps: PresenceCommandDeps = {
+    database,
+    expectedOrigin,
+    authenticate,
+    now,
+    ...(guard === undefined ? {} : { guard }),
+  }
   const workspaceDeps: WorkspaceCommandDeps = shared
   const organizationDeps: OrganizationCommandDeps = shared
 
@@ -265,6 +279,11 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     '/api/chat/work-items/assign': assignWorkItemHandler(workspaceDeps),
     '/api/chat/work-items/dependencies': addDependencyHandler(workspaceDeps),
     '/api/chat/notifications': inboxHandler(workspaceDeps),
+    // 在线状态。路径与插件侧一一对应 —— host 是原样转发的，改一边就断
+    '/api/chat/presence': presenceQueryHandler(presenceDeps),
+    '/api/chat/presence/heartbeat': heartbeatHandler(presenceDeps),
+    '/api/chat/presence/visibility': getVisibilityHandler(presenceDeps),
+    '/api/chat/presence/visibility/set': setVisibilityHandler(presenceDeps),
     '/api/organization': createOrganizationHandler(organizationDeps),
     '/api/organization/workspaces': createWorkspaceHandler(organizationDeps),
     '/api/organization/projects': createProjectHandler(organizationDeps),

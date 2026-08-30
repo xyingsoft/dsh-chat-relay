@@ -614,6 +614,61 @@ const migration007: Migration = {
   ],
 }
 
+/**
+ * 在线状态（§9.1）。
+ *
+ * 一行一「设备 × 组织」：同一台机器可能同时属于多个组织，而在线状态是按
+ * 组织回答的 —— 在 A 组织隐藏不该顺带在 B 组织也隐藏。
+ *
+ * 不保留历史心跳。在线状态是「此刻」的问题；「这台设备什么时候上过线」由
+ * 审计与 `devices.last_seen_at` 回答，两件事不要挤在一张表里。
+ *
+ * `last_interaction_at` 单独存而不是复用心跳时间：host 活着但没人操作，
+ * 正是 idle 要表达的东西。只有心跳时间的话，idle 永远不会出现。
+ */
+const migration008: Migration = {
+  version: 8,
+  name: 'device-presence',
+  statements: [
+    `CREATE TABLE device_presence (
+       device_id           TEXT NOT NULL,
+       account_id          TEXT NOT NULL REFERENCES accounts(account_id),
+       organization_id     TEXT NOT NULL,
+       last_heartbeat_at   TEXT NOT NULL,
+       -- 最近一次用户交互。与心跳分开 —— 见上方说明
+       last_interaction_at TEXT NOT NULL,
+       PRIMARY KEY (device_id, organization_id)
+     ) STRICT`,
+    `CREATE INDEX idx_device_presence_account
+       ON device_presence(organization_id, account_id)`,
+  ],
+}
+
+/**
+ * 在线可见性（§9.1 的三档）。
+ *
+ * 一行一「账号 × 组织」：可见性是按组织选的，「在公司组织里隐身、在朋友的
+ * 组织里正常」是一个合理的诉求，而把它做成全局设置就表达不了。
+ *
+ * 没有行时按 `everyone`。默认隐藏会让在线状态整个看起来是坏的 —— 用户
+ * 打开界面看到所有人都是「状态未知」，第一反应是功能没做完，而不是
+ * 「大家都隐身了」。
+ */
+const migration009: Migration = {
+  version: 9,
+  name: 'presence-visibility',
+  statements: [
+    `CREATE TABLE presence_visibility (
+       account_id      TEXT NOT NULL REFERENCES accounts(account_id),
+       organization_id TEXT NOT NULL,
+       -- everyone / shared_scopes / hidden
+       visibility      TEXT NOT NULL,
+       updated_at      TEXT NOT NULL,
+       PRIMARY KEY (account_id, organization_id)
+     ) STRICT`,
+  ],
+}
+
 /** 全部迁移，按版本升序。新增迁移只能追加，不能修改既有条目。 */
 export const MIGRATIONS: readonly Migration[] = [
   migration001,
@@ -623,4 +678,6 @@ export const MIGRATIONS: readonly Migration[] = [
   migration005,
   migration006,
   migration007,
+  migration008,
+  migration009,
 ]
