@@ -25,7 +25,7 @@ import { addDependency, assignWorkItem, createWorkItem, findWorkItem } from '../
 
 import type { ChatDatabaseService } from '../storage/database-port.js'
 
-import { commandHandler } from './command-router.js'
+import { commandHandler, type CommandGuard } from './command-router.js'
 import type { Principal } from './message-commands.js'
 
 export interface WorkspaceCommandDeps {
@@ -35,6 +35,14 @@ export interface WorkspaceCommandDeps {
   readonly now: () => Date
   /** ID 生成器。注入而非内置，使测试可复现（§45：测试数据不含真实凭证）。 */
   readonly newId: (prefix: string) => string
+  /**
+   * §7.1 的请求证明校验。没配 relay 指纹时为 undefined，届时不校验。
+   *
+   * 只挂业务端点。身份三件套是会话的**引导路径**：注册时还没有设备，
+   * refresh 根本不带 Bearer 头 —— 对它们要求签名等于要求「先有会话才能
+   * 建会话」。
+   */
+  readonly guard?: CommandGuard
 }
 
 /**
@@ -100,6 +108,7 @@ function parseCreateWorkItem(value: unknown): CreateWorkItemBody | undefined {
 export function createWorkItemHandler(deps: WorkspaceCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -167,6 +176,7 @@ export function createWorkItemHandler(deps: WorkspaceCommandDeps) {
 export function assignWorkItemHandler(deps: WorkspaceCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -266,6 +276,7 @@ export function assignWorkItemHandler(deps: WorkspaceCommandDeps) {
 export function addDependencyHandler(deps: WorkspaceCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -317,6 +328,7 @@ export function addDependencyHandler(deps: WorkspaceCommandDeps) {
 export function inboxHandler(deps: WorkspaceCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }

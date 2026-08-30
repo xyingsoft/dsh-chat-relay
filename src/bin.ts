@@ -17,6 +17,11 @@
  *   DSH_CHAT_RELAY_ALLOW_SHARED_SECRET_IDENTITY=1
  *                           允许持有共享密钥的一方声称任意账号。**默认关闭**，
  *                           开了会打警告。只给还没走注册流程的部署用
+ *   DSH_CHAT_RELAY_TLS_FINGERPRINT
+ *                           反向代理那张证书的公钥指纹（SHA-256，十六进制）。
+ *                           **配了才启用 §7.1 的请求证明校验** —— 本进程只听
+ *                           明文 HTTP，自己无从知道那张证书。不配会打警告
+ *   DSH_CHAT_RELAY_SKEW_MS  签名时间戳容忍窗口，毫秒。默认 300000（±5 分钟）
  */
 
 import { bootstrapInvite } from './bootstrap.js'
@@ -67,12 +72,25 @@ if (bootstrapCode !== undefined && bootstrapCode.length > 0) {
 
 const origin = process.env['DSH_CHAT_RELAY_ORIGIN']
 const allowSharedSecretIdentity = process.env['DSH_CHAT_RELAY_ALLOW_SHARED_SECRET_IDENTITY'] === '1'
+const tlsFingerprint = process.env['DSH_CHAT_RELAY_TLS_FINGERPRINT']
+const skewRaw = process.env['DSH_CHAT_RELAY_SKEW_MS']
+// 配了但不是正数就拒绝启动。悄悄回落到默认值的话，运维以为自己把窗口
+// 收紧到了 30 秒，实际还是 5 分钟
+if (skewRaw !== undefined && !(Number(skewRaw) > 0)) {
+  process.stderr.write(`DSH_CHAT_RELAY_SKEW_MS 不是正整数：${skewRaw}
+`)
+  process.exit(2)
+}
 const relay = await startRelay({
   databasePath,
   host,
   port,
   sharedSecret: secret,
   allowSharedSecretIdentity,
+  ...(tlsFingerprint === undefined || tlsFingerprint.length === 0
+    ? {}
+    : { tlsFingerprint }),
+  ...(skewRaw === undefined ? {} : { skewToleranceMs: Number(skewRaw) }),
   ...(origin === undefined ? {} : { expectedOrigin: origin }),
 })
 

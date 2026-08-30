@@ -38,6 +38,7 @@ import {
   signOutHandler,
   type IdentityCommandDeps,
 } from './http/identity-commands.js'
+import { createSignatureGuard } from './http/signature-guard.js'
 import {
   ackMessagesHandler,
   conversationsHandler,
@@ -102,6 +103,16 @@ export interface RelayOptions {
    * 控制。仅供还没走注册流程的部署临时使用，开启时启动会打警告。
    */
   readonly allowSharedSecretIdentity?: boolean
+  /**
+   * 本 relay 的 TLS 公钥指纹（§7）。**配了才启用 §7.1 的请求证明校验。**
+   *
+   * 本进程只听明文 HTTP，TLS 在反向代理那一层终止 —— 进程自己无从知道那张
+   * 证书的指纹，只能由部署方配进来。不配时启动会打一行说明「没在检查什么」
+   * 的警告，理由见 `signature-guard.ts` 的文件头。
+   */
+  readonly tlsFingerprint?: string
+  /** 签名时间戳的容忍窗口。默认 ±5 分钟（§7.1）。 */
+  readonly skewToleranceMs?: number
   /** 覆盖协议能力声明。不给则用 DEFAULT_CAPABILITY。 */
   readonly capability?: {
     readonly currentVersion: number
@@ -196,6 +207,22 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     )
   }
   const now = (): Date => new Date()
+
+  // §7.1 的请求证明。没配 relay 指纹就不启用 —— 警告里说清楚具体没在检查什么，
+  // 而不是含糊一句「安全性降低」，后者读的人无从判断要不要管
+  const guard = createSignatureGuard({
+    database: chat,
+    now,
+    ...(options.tlsFingerprint === undefined ? {} : { relayFingerprint: options.tlsFingerprint }),
+    ...(options.skewToleranceMs === undefined ? {} : { skewToleranceMs: options.skewToleranceMs }),
+  })
+  if (guard === undefined) {
+    process.stderr.write(
+      'dsh-chat-relay: 未配置 tlsFingerprint，§7.1 的请求证明校验**未启用**。\n' +
+        '  未在检查：请求是否真的来自持有该设备私钥的那台机器。\n' +
+        '  影响：一个被复制走的 access token 就是完整的身份，直到它过期或被撤销。\n',
+    )
+  }
   let idCounter = 0
   const newId = (prefix: string): string => `${prefix}-${Date.now()}-${(idCounter += 1)}`
 
@@ -209,11 +236,19 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     database,
     expectedOrigin,
     authenticate,
+    ...(guard === undefined ? {} : { guard }),
     queueCapacity: 1000,
     leaseMs: 60_000,
     now,
   }
-  const shared = { database, expectedOrigin, authenticate, now, newId }
+  const shared = {
+    database,
+    expectedOrigin,
+    authenticate,
+    now,
+    newId,
+    ...(guard === undefined ? {} : { guard }),
+  }
   const identityDeps: IdentityCommandDeps = { database, expectedOrigin, authenticate, now, newId }
   const workspaceDeps: WorkspaceCommandDeps = shared
   const organizationDeps: OrganizationCommandDeps = shared
@@ -253,7 +288,24 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     // PROTOCOL_VERSION_UNSUPPORTED —— 那正是 §41 禁止的「混同为认证失败」
     if (request.url === '/protocol/negotiate') {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-      response.end(JSON.stringify({ data: capability }))
+      // 一并声明本 relay 的指纹与是否要求签名。host 需要它才知道该不该签、
+      // 以及签什么。
+      //
+      // **从服务端读来的指纹本身不提供防中间人能力** —— 中间人当然会报自己
+      // 的。它的作用是让 host 能与**带外配置的期望值**比对（SSH 的
+      // known_hosts 那种钉法），以及在没配期望值时至少让签名能算出来。
+      // host 侧的比对逻辑与这条说明配套，见 relay/client.ts
+      response.end(
+        JSON.stringify({
+          data: {
+            ...capability,
+            requiresRequestSignature: guard !== undefined,
+            ...(options.tlsFingerprint === undefined
+              ? {}
+              : { relayFingerprint: options.tlsFingerprint }),
+          },
+        }),
+      )
       return
     }
 
