@@ -669,6 +669,64 @@ const migration009: Migration = {
   ],
 }
 
+/**
+ * 第二验证因素（§8）。
+ *
+ * 三张表：因素本体、一次性备用码、已消费的 TOTP 时间步。
+ *
+ * **备用码只存哈希**（§8）。存明文等于把「第二因素」降级成「第一.五因素」——
+ * 库被读走时它和密码一起丢。
+ *
+ * `totp_used_steps` 是重放防护：§8 要求「已消费的时间步在容忍窗口内记录并
+ * 拒绝重放」。不记的话，一个被肩窥到或从截图里读到的验证码在 90 秒内可以
+ * 被反复使用。这张表要定期清理窗口之外的行（`pruneUsedSteps`）。
+ *
+ * 三张表都不按组织分区：第二因素属**账号**维度，一个账号可属多个组织（§9），
+ * 而「在 A 组织通过了 2FA、在 B 组织没有」不是一个说得通的状态。
+ */
+const migration010: Migration = {
+  version: 10,
+  name: 'second-factor',
+  statements: [
+    `CREATE TABLE second_factors (
+       factor_id    TEXT PRIMARY KEY,
+       account_id   TEXT NOT NULL REFERENCES accounts(account_id),
+       -- P0 只有 totp；webauthn 属 P4
+       kind         TEXT NOT NULL,
+       -- pending（已登记未验证）/ active / revoked
+       state        TEXT NOT NULL,
+       -- TOTP 共享密钥，Base32。**这是一个真正的秘密** —— 与备用码不同，
+       -- 它无法只存哈希：验码时要用它重算
+       secret       TEXT,
+       created_at   TEXT NOT NULL,
+       activated_at TEXT,
+       revoked_at   TEXT
+     ) STRICT`,
+    `CREATE INDEX idx_second_factors_account ON second_factors(account_id, state)`,
+
+    `CREATE TABLE recovery_codes (
+       account_id  TEXT NOT NULL REFERENCES accounts(account_id),
+       -- SHA-256。明文只在签发那一次出现过
+       code_hash   TEXT NOT NULL,
+       created_at  TEXT NOT NULL,
+       -- 消费即失效但**不删行**：审计要能回答哪张码在什么时候被用掉了
+       consumed_at TEXT,
+       -- 重新签发时作废旧的一批
+       revoked_at  TEXT
+     ) STRICT`,
+    `CREATE INDEX idx_recovery_codes_usable
+       ON recovery_codes(account_id, consumed_at, revoked_at)`,
+
+    `CREATE TABLE totp_used_steps (
+       account_id TEXT NOT NULL REFERENCES accounts(account_id),
+       step       INTEGER NOT NULL,
+       used_at    TEXT NOT NULL,
+       PRIMARY KEY (account_id, step)
+     ) STRICT`,
+    `CREATE INDEX idx_totp_used_steps_prune ON totp_used_steps(step)`,
+  ],
+}
+
 /** 全部迁移，按版本升序。新增迁移只能追加，不能修改既有条目。 */
 export const MIGRATIONS: readonly Migration[] = [
   migration001,
@@ -680,4 +738,5 @@ export const MIGRATIONS: readonly Migration[] = [
   migration007,
   migration008,
   migration009,
+  migration010,
 ]
