@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: 构建与测试 / Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # node:sqlite 需要 Node 24 内置模块
+          node-version: '24'
+      - run: corepack enable
+      - run: yarn install --immutable
+      # 契约校验放在最前：协议漂移了，后面测什么都没意义
+      - run: yarn check:contract
+      - run: yarn check:types
+      - run: yarn check:test

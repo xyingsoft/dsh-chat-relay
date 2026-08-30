@@ -1,0 +1,25 @@
+{
+  "name": "dsh-chat-relay",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "dsh-chat 的 relay 服务：共享状态的持有者（队列、成员关系、工作项、通知、审计）",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "yarn@4.18.0",
+  "scripts": {
+    "build": "tsc --build",
+    "start": "node dist/bin.js",
+    "check": "yarn check:contract && yarn check:types && yarn check:test",
+    "check:contract": "node scripts/verify-contract.mjs",
+    "check:types": "tsc --build",
+    "check:test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "~5.9.2",
+    "vitest": "^4"
+  }
+}

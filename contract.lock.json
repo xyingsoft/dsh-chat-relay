@@ -1,0 +1,16 @@
+{
+  "source": {
+    "repository": "https://github.com/xyingsoft/dsh-chat",
+    "path": "packages/chat/contract/src"
+  },
+  "files": {
+    "audit.ts": "ff52c29ca19446a59371fb65b32681338264b1d6eb5bf285d94f573ea7f1361c",
+    "commands.ts": "c24b97275581489b446d1622694279c45f45cf7eeb575f2258c342522e638d45",
+    "errors.ts": "396d8cae1cfef161132ccfb53cbfac48767c4286f555fa48ff8686ac5ce812ef",
+    "index.ts": "97e458fa331c0253dd3d038edffbc5c6c9bafed556eb5fe1f8424bad68b86314",
+    "persistence.ts": "8b969e379c31276b8c9c5fc361e8d7adf05fd54a5c3f237cf9ce66ff82d56b5d",
+    "protocol.ts": "25afb2129acd39dda6b113b487501cdf6909fa2424d060ef1cce4bc4f4cbf7ad",
+    "states.ts": "3c73021f86623a477463bd5aae29e0bc97c87016f018055c71903dfffbcf5c17"
+  },
+  "aggregate": "cb36c98f1bd3e5c2a5a188e7155182ce466507fa285a5e3128e7e4403ae1c8e5"
+}
