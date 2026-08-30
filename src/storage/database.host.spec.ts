@@ -110,6 +110,10 @@ describe('§27 要求第一版即存在的字段', () => {
       'devices',
       'recovery_kits',
       'request_nonces',
+      // device_sessions 属**设备**维度：一个账号可属多个组织（§9），
+      // 但会话是「这台设备已通过认证」，跨组织通用。按组织分区的话，
+      // 用户每切一个组织就要重新登录一次
+      'device_sessions',
       'schema_migrations',
     ])
     const tables = (

@@ -546,6 +546,54 @@ const migration005: Migration = {
   ],
 }
 
+/**
+ * 版本 6：设备会话与 token。
+ *
+ * §7：relay「为该设备签发短期 access token 和可轮换的 refresh token」。
+ * §34：「设备会话绑定 `AccountId + DeviceId + keyFingerprint + tokenId`，
+ * 有短访问期、可轮换刷新期和 token 撤销列表。」
+ *
+ * ## 只存哈希，不存 token 本身
+ *
+ * 库被读走时，存明文 token 等于把所有活跃会话一起交出去。存哈希的话攻击者
+ * 拿到的是不能直接用的摘要 —— 与密码只存验证值是同一个道理（§9 对密码的要求）。
+ *
+ * ## 为什么 refresh 也要记 tokenId
+ *
+ * §34 要求有「token 撤销列表」。撤销要能指名道姓地撤某一个会话，
+ * 而不是「把这个设备的所有 token 都作废」—— 后者会把用户在别处的正常会话
+ * 一起踢掉。
+ *
+ * **这张表只在 relay 侧存在。** 插件的本地库是缓存，不持有他人的会话。
+ * 两边的迁移自此分叉，这是预期的。
+ */
+const migration006: Migration = {
+  version: 6,
+  name: 'device-sessions',
+  statements: [
+    `CREATE TABLE device_sessions (
+       token_id        TEXT PRIMARY KEY,
+       account_id      TEXT NOT NULL REFERENCES accounts(account_id),
+       device_id       TEXT NOT NULL REFERENCES devices(device_id),
+       -- §34：会话绑定到注册时的指纹。设备换了密钥，旧会话就该失效
+       key_fingerprint TEXT NOT NULL,
+       -- 只存 SHA-256，不存 token 本身
+       access_hash     TEXT NOT NULL,
+       refresh_hash    TEXT NOT NULL,
+       issued_at       TEXT NOT NULL,
+       access_expires_at  TEXT NOT NULL,
+       refresh_expires_at TEXT NOT NULL,
+       -- 撤销后保留行，用于「这个 token 是被撤销的」与「没见过这个 token」
+       -- 区分开 —— 后者可能是伪造，前者是已知会话被主动终止
+       revoked_at      TEXT,
+       revoked_reason  TEXT
+     ) STRICT`,
+    `CREATE INDEX idx_device_sessions_lookup ON device_sessions(access_hash)`,
+    `CREATE INDEX idx_device_sessions_refresh ON device_sessions(refresh_hash)`,
+    `CREATE INDEX idx_device_sessions_device ON device_sessions(device_id, revoked_at)`,
+  ],
+}
+
 /** 全部迁移，按版本升序。新增迁移只能追加，不能修改既有条目。 */
 export const MIGRATIONS: readonly Migration[] = [
   migration001,
@@ -553,4 +601,5 @@ export const MIGRATIONS: readonly Migration[] = [
   migration003,
   migration004,
   migration005,
+  migration006,
 ]
