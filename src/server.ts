@@ -18,16 +18,26 @@
  *
  * ## 认证
  *
- * §7.1 的请求签名校验实现在 `domain/identity/request-signing.ts`。本进程当前
- * **尚未接上它** —— 会话建立与 token 下发属 `P0-b`。在接上之前，
- * `authenticateFrom` 只认一个部署期配置的共享密钥，且**默认不配就全部拒绝**。
- * 这一点在 README 的「安全边界」里同样写明，不靠读代码才能发现。
+ * 正路是**设备会话 token**：`/api/identity/register` 用邀请码开户并签发一对
+ * token，`authenticateFrom` 从会话查出账号与设备，调用方说了不算。
+ *
+ * §7.1 的**请求签名**校验实现在 `domain/identity/request-signing.ts`，但本进程
+ * 尚未把它挂进请求路径 —— token 证明「持有者曾通过认证」，签名才证明「这次请求
+ * 确实来自那台设备」，两者是叠加关系。缺口登记在 README 的「安全边界」，
+ * 不靠读代码才能发现。
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 
+import { resolveSession } from './domain/identity/sessions.js'
 import { ChatDatabase } from './storage/database.js'
+import {
+  refreshSessionHandler,
+  registerAccountHandler,
+  signOutHandler,
+  type IdentityCommandDeps,
+} from './http/identity-commands.js'
 import {
   ackMessagesHandler,
   conversationsHandler,
@@ -85,6 +95,13 @@ export interface RelayOptions {
   readonly sharedSecret?: string
   /** 允许的 host 来源，用于跨源判定。 */
   readonly expectedOrigin?: string
+  /**
+   * 允许用共享密钥直接声称身份。**默认关闭。**
+   *
+   * 开启后任何持有密钥的一方都能声称自己是任意账号 —— 那不是认证，是接入
+   * 控制。仅供还没走注册流程的部署临时使用，开启时启动会打警告。
+   */
+  readonly allowSharedSecretIdentity?: boolean
   /** 覆盖协议能力声明。不给则用 DEFAULT_CAPABILITY。 */
   readonly capability?: {
     readonly currentVersion: number
@@ -107,26 +124,54 @@ function secretMatches(provided: string, expected: string): boolean {
 /**
  * 从请求解析调用者。
  *
- * **临时实现，边界见文件头。** 共享密钥只证明「这是一台被授权接入的 host」，
- * 不证明「请求来自哪个账号」—— 账号由请求头声明。真正的绑定要靠 §7.1 的
- * 设备签名，那属 `P0-b`。
+ * 两条路径，**按强度优先**：
  *
- * 之所以不假装它更强：一个看起来像认证、实际只是共享密钥的东西，比一个
- * 明说自己是共享密钥的东西危险得多。
+ * 1. **设备会话 token**（`authorization: Bearer <access token>`）。账号与设备
+ *    由服务端从会话查出来，调用方说了不算。这是正路。
+ * 2. **部署期共享密钥**，仅当显式开启 `allowSharedSecretIdentity` 时可用。
+ *    它只证明「这是一台被授权接入的 host」，账号由请求头声明 —— 也就是说
+ *    **任何持有密钥的一方都可以声称自己是任意账号**。
+ *
+ * 第 2 条默认关闭。它存在只是为了让还没走注册流程的部署能先跑起来，
+ * 开启时启动日志会打一行警告 —— 一个看起来像认证、实际只是共享密钥的东西，
+ * 比一个明说自己是共享密钥的东西危险得多。
+ *
+ * 组织仍由请求头声明：一个账号可属多个组织（§9），当前操作在哪个组织下是
+ * 调用方的选择。授权判定会再查该账号在那个组织的成员关系，声称一个不属于
+ * 自己的组织拿不到任何东西。
  */
-function authenticateFrom(options: RelayOptions): (request: IncomingMessage) => Principal | undefined {
+function authenticateFrom(
+  options: RelayOptions,
+  chat: ChatDatabase,
+): (request: IncomingMessage) => Principal | undefined {
   const secret = options.sharedSecret
-  if (secret === undefined || secret.length === 0) return () => undefined
 
   return (request) => {
     const header = request.headers['authorization']
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) return undefined
-    if (!secretMatches(header.slice('Bearer '.length), secret)) return undefined
+    const presented = header.slice('Bearer '.length)
+
+    const organizationId = request.headers['x-dsh-organization']
+    if (typeof organizationId !== 'string' || organizationId.length === 0) return undefined
+
+    // 先试会话 token
+    const session = chat.transaction((db) => resolveSession(db, presented, new Date()))
+    if (session.ok) {
+      return {
+        accountId: session.value.accountId,
+        deviceId: session.value.deviceId,
+        organizationId,
+      }
+    }
+
+    // 再回落共享密钥 —— 仅在显式开启时
+    if (options.allowSharedSecretIdentity !== true) return undefined
+    if (secret === undefined || secret.length === 0) return undefined
+    if (!secretMatches(presented, secret)) return undefined
 
     const accountId = request.headers['x-dsh-account']
-    const organizationId = request.headers['x-dsh-organization']
     const deviceId = request.headers['x-dsh-device']
-    if (typeof accountId !== 'string' || typeof organizationId !== 'string') return undefined
+    if (typeof accountId !== 'string' || accountId.length === 0) return undefined
 
     return {
       accountId,
@@ -143,7 +188,13 @@ export interface RunningRelay {
 
 export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
   const chat = ChatDatabase.open({ location: options.databasePath })
-  const authenticate = authenticateFrom(options)
+  const authenticate = authenticateFrom(options, chat)
+  if (options.allowSharedSecretIdentity === true) {
+    process.stderr.write(
+      'dsh-chat-relay: 已开启 allowSharedSecretIdentity —— ' +
+        '任何持有共享密钥的一方都能声称自己是任意账号。仅供尚未走注册流程的部署临时使用。\n',
+    )
+  }
   const now = (): Date => new Date()
   let idCounter = 0
   const newId = (prefix: string): string => `${prefix}-${Date.now()}-${(idCounter += 1)}`
@@ -163,6 +214,7 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     now,
   }
   const shared = { database, expectedOrigin, authenticate, now, newId }
+  const identityDeps: IdentityCommandDeps = { database, expectedOrigin, authenticate, now, newId }
   const workspaceDeps: WorkspaceCommandDeps = shared
   const organizationDeps: OrganizationCommandDeps = shared
 
@@ -184,6 +236,10 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     '/api/organization/members/invite': inviteMemberHandler(organizationDeps),
     '/api/organization/members/accept': acceptMembershipHandler(organizationDeps),
     '/api/organization/members/me': myMembershipsHandler(organizationDeps),
+    // 身份：注册与刷新**不要求已有会话**，那正是它们存在的原因
+    '/api/identity/register': registerAccountHandler(identityDeps),
+    '/api/identity/session/refresh': refreshSessionHandler(identityDeps),
+    '/api/identity/session/sign-out': signOutHandler(identityDeps),
   }
 
   const capability = options.capability ?? DEFAULT_CAPABILITY

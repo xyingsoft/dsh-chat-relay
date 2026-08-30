@@ -26,6 +26,9 @@ async function start(options: { secret?: string } = {}): Promise<string> {
     databasePath: join(workDir, 'relay.db'),
     host: '127.0.0.1',
     port: 0,
+    // 这一组用例测的是共享密钥这条**回落**路径，所以显式开启它。
+    // 默认关闭 —— 见 authenticateFrom 上的说明
+    allowSharedSecretIdentity: true,
     ...(options.secret === undefined ? {} : { sharedSecret: options.secret }),
   })
   return `http://127.0.0.1:${relay.port}`
@@ -183,12 +186,13 @@ describe('路由', () => {
 /**
  * 预置账号。
  *
- * relay **还没有账号开通端点** —— §7 规定注册走邀请码，`invite-codes.ts` 已经
- * 实现了消费逻辑，但没有对应的 HTTP 入口。在有之前，这里直接写库。
+ * 正规开户走 `/api/identity/register`（邀请码 + 设备公钥），覆盖在
+ * `http/identity-commands.host.spec.ts`。这一组测的是**共享密钥回落**那条路径，
+ * 它按定义没有注册流程，所以这里直接写库预置。
  *
- * 不顺手加一个「凭共享密钥就能建账号」的端点：共享密钥证明的是「这是一台被
- * 授权接入的 host」，不是「这个人有权开户」，两件事混在一起就等于谁拿到密钥
- * 谁就能造账号。缺口登记在 README。
+ * 始终没有、也不会有「凭共享密钥就能建账号」的端点：共享密钥证明的是「这是一台
+ * 被授权接入的 host」，不是「这个人有权开户」，两件事混在一起就等于谁拿到密钥
+ * 谁就能造账号。
  */
 function seedAccount(dbPath: string, accountId: string): void {
   const db = ChatDatabase.open({ location: dbPath })
@@ -204,7 +208,13 @@ describe('数据落在 relay 自己的库里', () => {
   it('写入后重启进程仍在', async () => {
     const dbPath = join(workDir, 'relay.db')
     seedAccount(dbPath, 'jia')
-    relay = await startRelay({ databasePath: dbPath, host: '127.0.0.1', port: 0, sharedSecret: SECRET })
+    relay = await startRelay({
+      databasePath: dbPath,
+      host: '127.0.0.1',
+      port: 0,
+      sharedSecret: SECRET,
+      allowSharedSecretIdentity: true,
+    })
     const base = `http://127.0.0.1:${relay.port}`
 
     const created = await fetch(`${base}/api/organization`, {
@@ -219,7 +229,13 @@ describe('数据落在 relay 自己的库里', () => {
     const newOrg = createdBody.data.organization.organizationId
 
     await relay.close()
-    relay = await startRelay({ databasePath: dbPath, host: '127.0.0.1', port: 0, sharedSecret: SECRET })
+    relay = await startRelay({
+      databasePath: dbPath,
+      host: '127.0.0.1',
+      port: 0,
+      sharedSecret: SECRET,
+      allowSharedSecretIdentity: true,
+    })
     const reopened = `http://127.0.0.1:${relay.port}`
 
     // 查成员关系时要报**新组织**的 ID。仍用请求头里那个 org-1 会得到 0 条 ——
