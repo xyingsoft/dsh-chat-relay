@@ -594,6 +594,26 @@ const migration006: Migration = {
   ],
 }
 
+/**
+ * 设备名称。
+ *
+ * §7 明确要求注册时提交「公钥、**设备名称**和公钥指纹」，`registerDevice` 也
+ * 一直收着这个字段 —— 只是从来没有列可以放，于是它被静默丢掉了。端到端测试
+ * 想核对「注册的那台机器叫什么」时才暴露出来。
+ *
+ * 这不是可有可无的展示字段：§9 的设备撤销要用户在安全中心里认出「哪一台」，
+ * 一列 `dev-1755…` 的 ID 认不出任何东西。
+ *
+ * 既有行填「未命名设备」而不是留空 —— 界面上少一个要处理的 null。
+ */
+const migration007: Migration = {
+  version: 7,
+  name: 'device-name',
+  statements: [
+    `ALTER TABLE devices ADD COLUMN device_name TEXT NOT NULL DEFAULT '未命名设备'`,
+  ],
+}
+
 /** 全部迁移，按版本升序。新增迁移只能追加，不能修改既有条目。 */
 export const MIGRATIONS: readonly Migration[] = [
   migration001,
@@ -602,4 +622,5 @@ export const MIGRATIONS: readonly Migration[] = [
   migration004,
   migration005,
   migration006,
+  migration007,
 ]
