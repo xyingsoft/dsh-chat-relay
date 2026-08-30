@@ -56,6 +56,23 @@ import {
   type WorkspaceCommandDeps,
 } from './http/workspace-commands.js'
 
+/**
+ * 本 relay 的协议能力声明（§41）。
+ *
+ * `minimumVersion` 与兼容窗口是**部署决策**而不是协议规则 —— 文档说窗口是
+ * 「两个次要版本或 90 天中的较长者」，怎么换算成一个数字由部署方定，所以
+ * 可以从 options 覆盖。
+ */
+const DEFAULT_CAPABILITY = {
+  currentVersion: 1,
+  minimumVersion: 1,
+  eventFormatVersions: {
+    message_accepted: 1,
+    notification_created: 1,
+    work_item_changed: 1,
+  },
+} as const
+
 export interface RelayOptions {
   readonly databasePath: string
   readonly host?: string
@@ -68,6 +85,13 @@ export interface RelayOptions {
   readonly sharedSecret?: string
   /** 允许的 host 来源，用于跨源判定。 */
   readonly expectedOrigin?: string
+  /** 覆盖协议能力声明。不给则用 DEFAULT_CAPABILITY。 */
+  readonly capability?: {
+    readonly currentVersion: number
+    readonly minimumVersion: number
+    readonly eventFormatVersions: Readonly<Record<string, number>>
+    readonly deprecationDeadline?: string
+  }
 }
 
 type RouteHandler = (request: IncomingMessage, response: ServerResponse) => void
@@ -162,7 +186,21 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     '/api/organization/members/me': myMembershipsHandler(organizationDeps),
   }
 
+  const capability = options.capability ?? DEFAULT_CAPABILITY
+
   const server = createServer((request, response) => {
+    // 协议协商在认证之前。§41 要求「host 在建立设备会话时提交自身协议版本」——
+    // 会话还没建立，此时要求认证是先有鸡还是先有蛋。
+    //
+    // 这里只暴露版本号与事件格式，不含任何组织数据，所以未认证可读是安全的；
+    // 反过来说，把它挡在认证之后会让版本过旧的 host 拿到 401 而不是
+    // PROTOCOL_VERSION_UNSUPPORTED —— 那正是 §41 禁止的「混同为认证失败」
+    if (request.url === '/protocol/negotiate') {
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      response.end(JSON.stringify({ data: capability }))
+      return
+    }
+
     // 健康检查不需要认证 —— 部署探针拿不到共享密钥，而它只暴露「进程活着」
     if (request.url === '/health') {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })

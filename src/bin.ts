@@ -32,7 +32,9 @@ if (databasePath === undefined || databasePath.length === 0) {
 // 默认监听 0.0.0.0 的服务是被扫到的第一批
 const host = process.env['DSH_CHAT_RELAY_HOST'] ?? '127.0.0.1'
 const port = Number(process.env['DSH_CHAT_RELAY_PORT'] ?? '8787')
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
+// 允许 0：那是「让内核分配空闲端口」的标准写法，测试与容器部署都用它。
+// 第一版把 0 当非法，结果端到端测试根本起不来 relay
+if (!Number.isInteger(port) || port < 0 || port > 65535) {
   process.stderr.write(`DSH_CHAT_RELAY_PORT 不是合法端口：${String(process.env['DSH_CHAT_RELAY_PORT'])}\n`)
   process.exit(2)
 }
