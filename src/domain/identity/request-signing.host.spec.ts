@@ -15,6 +15,8 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { MIGRATIONS } from '../../storage/migrations.js'
+
 import {
   deviceOf,
   fingerprintOf,
@@ -39,30 +41,28 @@ let keys: DeviceKeyPair
 const RELAY_FINGERPRINT = 'a'.repeat(64)
 const NOW = new Date('2026-08-30T12:00:00.000Z')
 
+/**
+ * 建库走**真实迁移**，不手写 schema。
+ *
+ * 这里原本有一份手抄的 `CREATE TABLE`，只列了这几个用例用得着的字段。代价是
+ * 它与 `migrations.ts` 各自演化：`device_name` 在 `registerDevice` 的入参里
+ * 存在了很久，却一直没有列可以放，而这份手抄的 schema 让所有测试照样通过 ——
+ * 缺口是端到端测试想查「那台机器叫什么」时才发现的。
+ *
+ * 用真实迁移就没有第二份真相。代价是每个用例多建二十几张表，在内存库上
+ * 是可以忽略的开销。
+ */
 beforeEach(() => {
   db = new DatabaseSync(':memory:')
-  db.exec(`
-    CREATE TABLE accounts (account_id TEXT PRIMARY KEY) STRICT;
-    CREATE TABLE devices (
-      device_id TEXT PRIMARY KEY,
-      account_id TEXT NOT NULL REFERENCES accounts(account_id),
-      signing_public_key TEXT NOT NULL,
-      agreement_public_key TEXT,
-      key_fingerprint TEXT NOT NULL,
-      state TEXT NOT NULL,
-      first_seen_at TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL,
-      seen_account_state_seq INTEGER NOT NULL DEFAULT 0
-    ) STRICT;
-    CREATE TABLE request_nonces (
-      device_id TEXT NOT NULL,
-      nonce TEXT NOT NULL,
-      seen_at TEXT NOT NULL,
-      PRIMARY KEY (device_id, nonce)
-    ) STRICT;
-  `)
-  db.prepare('INSERT INTO accounts VALUES (?)').run('acct-jia')
-  db.prepare('INSERT INTO accounts VALUES (?)').run('acct-yi')
+  db.exec('PRAGMA foreign_keys = ON')
+  for (const migration of MIGRATIONS) {
+    for (const statement of migration.statements) db.exec(statement)
+  }
+  const insertAccount = db.prepare(
+    'INSERT INTO accounts (account_id, display_name, created_at) VALUES (?,?,?)',
+  )
+  insertAccount.run('acct-jia', '甲', NOW.toISOString())
+  insertAccount.run('acct-yi', '乙', NOW.toISOString())
 
   keys = generateDeviceKeyPair()
   registerDevice(db, {

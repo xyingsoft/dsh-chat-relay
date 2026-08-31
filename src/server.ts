@@ -18,16 +18,34 @@
  *
  * ## 认证
  *
- * §7.1 的请求签名校验实现在 `domain/identity/request-signing.ts`。本进程当前
- * **尚未接上它** —— 会话建立与 token 下发属 `P0-b`。在接上之前，
- * `authenticateFrom` 只认一个部署期配置的共享密钥，且**默认不配就全部拒绝**。
- * 这一点在 README 的「安全边界」里同样写明，不靠读代码才能发现。
+ * 正路是**设备会话 token**：`/api/identity/register` 用邀请码开户并签发一对
+ * token，`authenticateFrom` 从会话查出账号与设备，调用方说了不算。
+ *
+ * §7.1 的**请求签名**校验实现在 `domain/identity/request-signing.ts`，但本进程
+ * 尚未把它挂进请求路径 —— token 证明「持有者曾通过认证」，签名才证明「这次请求
+ * 确实来自那台设备」，两者是叠加关系。缺口登记在 README 的「安全边界」，
+ * 不靠读代码才能发现。
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 
+import { resolveSession } from './domain/identity/sessions.js'
 import { ChatDatabase } from './storage/database.js'
+import {
+  refreshSessionHandler,
+  registerAccountHandler,
+  signOutHandler,
+  type IdentityCommandDeps,
+} from './http/identity-commands.js'
+import {
+  getVisibilityHandler,
+  heartbeatHandler,
+  presenceQueryHandler,
+  setVisibilityHandler,
+  type PresenceCommandDeps,
+} from './http/presence-commands.js'
+import { createSignatureGuard } from './http/signature-guard.js'
 import {
   ackMessagesHandler,
   conversationsHandler,
@@ -85,6 +103,23 @@ export interface RelayOptions {
   readonly sharedSecret?: string
   /** 允许的 host 来源，用于跨源判定。 */
   readonly expectedOrigin?: string
+  /**
+   * 允许用共享密钥直接声称身份。**默认关闭。**
+   *
+   * 开启后任何持有密钥的一方都能声称自己是任意账号 —— 那不是认证，是接入
+   * 控制。仅供还没走注册流程的部署临时使用，开启时启动会打警告。
+   */
+  readonly allowSharedSecretIdentity?: boolean
+  /**
+   * 本 relay 的 TLS 公钥指纹（§7）。**配了才启用 §7.1 的请求证明校验。**
+   *
+   * 本进程只听明文 HTTP，TLS 在反向代理那一层终止 —— 进程自己无从知道那张
+   * 证书的指纹，只能由部署方配进来。不配时启动会打一行说明「没在检查什么」
+   * 的警告，理由见 `signature-guard.ts` 的文件头。
+   */
+  readonly tlsFingerprint?: string
+  /** 签名时间戳的容忍窗口。默认 ±5 分钟（§7.1）。 */
+  readonly skewToleranceMs?: number
   /** 覆盖协议能力声明。不给则用 DEFAULT_CAPABILITY。 */
   readonly capability?: {
     readonly currentVersion: number
@@ -107,26 +142,54 @@ function secretMatches(provided: string, expected: string): boolean {
 /**
  * 从请求解析调用者。
  *
- * **临时实现，边界见文件头。** 共享密钥只证明「这是一台被授权接入的 host」，
- * 不证明「请求来自哪个账号」—— 账号由请求头声明。真正的绑定要靠 §7.1 的
- * 设备签名，那属 `P0-b`。
+ * 两条路径，**按强度优先**：
  *
- * 之所以不假装它更强：一个看起来像认证、实际只是共享密钥的东西，比一个
- * 明说自己是共享密钥的东西危险得多。
+ * 1. **设备会话 token**（`authorization: Bearer <access token>`）。账号与设备
+ *    由服务端从会话查出来，调用方说了不算。这是正路。
+ * 2. **部署期共享密钥**，仅当显式开启 `allowSharedSecretIdentity` 时可用。
+ *    它只证明「这是一台被授权接入的 host」，账号由请求头声明 —— 也就是说
+ *    **任何持有密钥的一方都可以声称自己是任意账号**。
+ *
+ * 第 2 条默认关闭。它存在只是为了让还没走注册流程的部署能先跑起来，
+ * 开启时启动日志会打一行警告 —— 一个看起来像认证、实际只是共享密钥的东西，
+ * 比一个明说自己是共享密钥的东西危险得多。
+ *
+ * 组织仍由请求头声明：一个账号可属多个组织（§9），当前操作在哪个组织下是
+ * 调用方的选择。授权判定会再查该账号在那个组织的成员关系，声称一个不属于
+ * 自己的组织拿不到任何东西。
  */
-function authenticateFrom(options: RelayOptions): (request: IncomingMessage) => Principal | undefined {
+function authenticateFrom(
+  options: RelayOptions,
+  chat: ChatDatabase,
+): (request: IncomingMessage) => Principal | undefined {
   const secret = options.sharedSecret
-  if (secret === undefined || secret.length === 0) return () => undefined
 
   return (request) => {
     const header = request.headers['authorization']
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) return undefined
-    if (!secretMatches(header.slice('Bearer '.length), secret)) return undefined
+    const presented = header.slice('Bearer '.length)
+
+    const organizationId = request.headers['x-dsh-organization']
+    if (typeof organizationId !== 'string' || organizationId.length === 0) return undefined
+
+    // 先试会话 token
+    const session = chat.transaction((db) => resolveSession(db, presented, new Date()))
+    if (session.ok) {
+      return {
+        accountId: session.value.accountId,
+        deviceId: session.value.deviceId,
+        organizationId,
+      }
+    }
+
+    // 再回落共享密钥 —— 仅在显式开启时
+    if (options.allowSharedSecretIdentity !== true) return undefined
+    if (secret === undefined || secret.length === 0) return undefined
+    if (!secretMatches(presented, secret)) return undefined
 
     const accountId = request.headers['x-dsh-account']
-    const organizationId = request.headers['x-dsh-organization']
     const deviceId = request.headers['x-dsh-device']
-    if (typeof accountId !== 'string' || typeof organizationId !== 'string') return undefined
+    if (typeof accountId !== 'string' || accountId.length === 0) return undefined
 
     return {
       accountId,
@@ -143,8 +206,30 @@ export interface RunningRelay {
 
 export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
   const chat = ChatDatabase.open({ location: options.databasePath })
-  const authenticate = authenticateFrom(options)
+  const authenticate = authenticateFrom(options, chat)
+  if (options.allowSharedSecretIdentity === true) {
+    process.stderr.write(
+      'dsh-chat-relay: 已开启 allowSharedSecretIdentity —— ' +
+        '任何持有共享密钥的一方都能声称自己是任意账号。仅供尚未走注册流程的部署临时使用。\n',
+    )
+  }
   const now = (): Date => new Date()
+
+  // §7.1 的请求证明。没配 relay 指纹就不启用 —— 警告里说清楚具体没在检查什么，
+  // 而不是含糊一句「安全性降低」，后者读的人无从判断要不要管
+  const guard = createSignatureGuard({
+    database: chat,
+    now,
+    ...(options.tlsFingerprint === undefined ? {} : { relayFingerprint: options.tlsFingerprint }),
+    ...(options.skewToleranceMs === undefined ? {} : { skewToleranceMs: options.skewToleranceMs }),
+  })
+  if (guard === undefined) {
+    process.stderr.write(
+      'dsh-chat-relay: 未配置 tlsFingerprint，§7.1 的请求证明校验**未启用**。\n' +
+        '  未在检查：请求是否真的来自持有该设备私钥的那台机器。\n' +
+        '  影响：一个被复制走的 access token 就是完整的身份，直到它过期或被撤销。\n',
+    )
+  }
   let idCounter = 0
   const newId = (prefix: string): string => `${prefix}-${Date.now()}-${(idCounter += 1)}`
 
@@ -158,11 +243,27 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     database,
     expectedOrigin,
     authenticate,
+    ...(guard === undefined ? {} : { guard }),
     queueCapacity: 1000,
     leaseMs: 60_000,
     now,
   }
-  const shared = { database, expectedOrigin, authenticate, now, newId }
+  const shared = {
+    database,
+    expectedOrigin,
+    authenticate,
+    now,
+    newId,
+    ...(guard === undefined ? {} : { guard }),
+  }
+  const identityDeps: IdentityCommandDeps = { database, expectedOrigin, authenticate, now, newId }
+  const presenceDeps: PresenceCommandDeps = {
+    database,
+    expectedOrigin,
+    authenticate,
+    now,
+    ...(guard === undefined ? {} : { guard }),
+  }
   const workspaceDeps: WorkspaceCommandDeps = shared
   const organizationDeps: OrganizationCommandDeps = shared
 
@@ -178,12 +279,21 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     '/api/chat/work-items/assign': assignWorkItemHandler(workspaceDeps),
     '/api/chat/work-items/dependencies': addDependencyHandler(workspaceDeps),
     '/api/chat/notifications': inboxHandler(workspaceDeps),
+    // 在线状态。路径与插件侧一一对应 —— host 是原样转发的，改一边就断
+    '/api/chat/presence': presenceQueryHandler(presenceDeps),
+    '/api/chat/presence/heartbeat': heartbeatHandler(presenceDeps),
+    '/api/chat/presence/visibility': getVisibilityHandler(presenceDeps),
+    '/api/chat/presence/visibility/set': setVisibilityHandler(presenceDeps),
     '/api/organization': createOrganizationHandler(organizationDeps),
     '/api/organization/workspaces': createWorkspaceHandler(organizationDeps),
     '/api/organization/projects': createProjectHandler(organizationDeps),
     '/api/organization/members/invite': inviteMemberHandler(organizationDeps),
     '/api/organization/members/accept': acceptMembershipHandler(organizationDeps),
     '/api/organization/members/me': myMembershipsHandler(organizationDeps),
+    // 身份：注册与刷新**不要求已有会话**，那正是它们存在的原因
+    '/api/identity/register': registerAccountHandler(identityDeps),
+    '/api/identity/session/refresh': refreshSessionHandler(identityDeps),
+    '/api/identity/session/sign-out': signOutHandler(identityDeps),
   }
 
   const capability = options.capability ?? DEFAULT_CAPABILITY
@@ -197,7 +307,24 @@ export async function startRelay(options: RelayOptions): Promise<RunningRelay> {
     // PROTOCOL_VERSION_UNSUPPORTED —— 那正是 §41 禁止的「混同为认证失败」
     if (request.url === '/protocol/negotiate') {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-      response.end(JSON.stringify({ data: capability }))
+      // 一并声明本 relay 的指纹与是否要求签名。host 需要它才知道该不该签、
+      // 以及签什么。
+      //
+      // **从服务端读来的指纹本身不提供防中间人能力** —— 中间人当然会报自己
+      // 的。它的作用是让 host 能与**带外配置的期望值**比对（SSH 的
+      // known_hosts 那种钉法），以及在没配期望值时至少让签名能算出来。
+      // host 侧的比对逻辑与这条说明配套，见 relay/client.ts
+      response.end(
+        JSON.stringify({
+          data: {
+            ...capability,
+            requiresRequestSignature: guard !== undefined,
+            ...(options.tlsFingerprint === undefined
+              ? {}
+              : { relayFingerprint: options.tlsFingerprint }),
+          },
+        }),
+      )
       return
     }
 

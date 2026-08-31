@@ -546,6 +546,187 @@ const migration005: Migration = {
   ],
 }
 
+/**
+ * 版本 6：设备会话与 token。
+ *
+ * §7：relay「为该设备签发短期 access token 和可轮换的 refresh token」。
+ * §34：「设备会话绑定 `AccountId + DeviceId + keyFingerprint + tokenId`，
+ * 有短访问期、可轮换刷新期和 token 撤销列表。」
+ *
+ * ## 只存哈希，不存 token 本身
+ *
+ * 库被读走时，存明文 token 等于把所有活跃会话一起交出去。存哈希的话攻击者
+ * 拿到的是不能直接用的摘要 —— 与密码只存验证值是同一个道理（§9 对密码的要求）。
+ *
+ * ## 为什么 refresh 也要记 tokenId
+ *
+ * §34 要求有「token 撤销列表」。撤销要能指名道姓地撤某一个会话，
+ * 而不是「把这个设备的所有 token 都作废」—— 后者会把用户在别处的正常会话
+ * 一起踢掉。
+ *
+ * **这张表只在 relay 侧存在。** 插件的本地库是缓存，不持有他人的会话。
+ * 两边的迁移自此分叉，这是预期的。
+ */
+const migration006: Migration = {
+  version: 6,
+  name: 'device-sessions',
+  statements: [
+    `CREATE TABLE device_sessions (
+       token_id        TEXT PRIMARY KEY,
+       account_id      TEXT NOT NULL REFERENCES accounts(account_id),
+       device_id       TEXT NOT NULL REFERENCES devices(device_id),
+       -- §34：会话绑定到注册时的指纹。设备换了密钥，旧会话就该失效
+       key_fingerprint TEXT NOT NULL,
+       -- 只存 SHA-256，不存 token 本身
+       access_hash     TEXT NOT NULL,
+       refresh_hash    TEXT NOT NULL,
+       issued_at       TEXT NOT NULL,
+       access_expires_at  TEXT NOT NULL,
+       refresh_expires_at TEXT NOT NULL,
+       -- 撤销后保留行，用于「这个 token 是被撤销的」与「没见过这个 token」
+       -- 区分开 —— 后者可能是伪造，前者是已知会话被主动终止
+       revoked_at      TEXT,
+       revoked_reason  TEXT
+     ) STRICT`,
+    `CREATE INDEX idx_device_sessions_lookup ON device_sessions(access_hash)`,
+    `CREATE INDEX idx_device_sessions_refresh ON device_sessions(refresh_hash)`,
+    `CREATE INDEX idx_device_sessions_device ON device_sessions(device_id, revoked_at)`,
+  ],
+}
+
+/**
+ * 设备名称。
+ *
+ * §7 明确要求注册时提交「公钥、**设备名称**和公钥指纹」，`registerDevice` 也
+ * 一直收着这个字段 —— 只是从来没有列可以放，于是它被静默丢掉了。端到端测试
+ * 想核对「注册的那台机器叫什么」时才暴露出来。
+ *
+ * 这不是可有可无的展示字段：§9 的设备撤销要用户在安全中心里认出「哪一台」，
+ * 一列 `dev-1755…` 的 ID 认不出任何东西。
+ *
+ * 既有行填「未命名设备」而不是留空 —— 界面上少一个要处理的 null。
+ */
+const migration007: Migration = {
+  version: 7,
+  name: 'device-name',
+  statements: [
+    `ALTER TABLE devices ADD COLUMN device_name TEXT NOT NULL DEFAULT '未命名设备'`,
+  ],
+}
+
+/**
+ * 在线状态（§9.1）。
+ *
+ * 一行一「设备 × 组织」：同一台机器可能同时属于多个组织，而在线状态是按
+ * 组织回答的 —— 在 A 组织隐藏不该顺带在 B 组织也隐藏。
+ *
+ * 不保留历史心跳。在线状态是「此刻」的问题；「这台设备什么时候上过线」由
+ * 审计与 `devices.last_seen_at` 回答，两件事不要挤在一张表里。
+ *
+ * `last_interaction_at` 单独存而不是复用心跳时间：host 活着但没人操作，
+ * 正是 idle 要表达的东西。只有心跳时间的话，idle 永远不会出现。
+ */
+const migration008: Migration = {
+  version: 8,
+  name: 'device-presence',
+  statements: [
+    `CREATE TABLE device_presence (
+       device_id           TEXT NOT NULL,
+       account_id          TEXT NOT NULL REFERENCES accounts(account_id),
+       organization_id     TEXT NOT NULL,
+       last_heartbeat_at   TEXT NOT NULL,
+       -- 最近一次用户交互。与心跳分开 —— 见上方说明
+       last_interaction_at TEXT NOT NULL,
+       PRIMARY KEY (device_id, organization_id)
+     ) STRICT`,
+    `CREATE INDEX idx_device_presence_account
+       ON device_presence(organization_id, account_id)`,
+  ],
+}
+
+/**
+ * 在线可见性（§9.1 的三档）。
+ *
+ * 一行一「账号 × 组织」：可见性是按组织选的，「在公司组织里隐身、在朋友的
+ * 组织里正常」是一个合理的诉求，而把它做成全局设置就表达不了。
+ *
+ * 没有行时按 `everyone`。默认隐藏会让在线状态整个看起来是坏的 —— 用户
+ * 打开界面看到所有人都是「状态未知」，第一反应是功能没做完，而不是
+ * 「大家都隐身了」。
+ */
+const migration009: Migration = {
+  version: 9,
+  name: 'presence-visibility',
+  statements: [
+    `CREATE TABLE presence_visibility (
+       account_id      TEXT NOT NULL REFERENCES accounts(account_id),
+       organization_id TEXT NOT NULL,
+       -- everyone / shared_scopes / hidden
+       visibility      TEXT NOT NULL,
+       updated_at      TEXT NOT NULL,
+       PRIMARY KEY (account_id, organization_id)
+     ) STRICT`,
+  ],
+}
+
+/**
+ * 第二验证因素（§8）。
+ *
+ * 三张表：因素本体、一次性备用码、已消费的 TOTP 时间步。
+ *
+ * **备用码只存哈希**（§8）。存明文等于把「第二因素」降级成「第一.五因素」——
+ * 库被读走时它和密码一起丢。
+ *
+ * `totp_used_steps` 是重放防护：§8 要求「已消费的时间步在容忍窗口内记录并
+ * 拒绝重放」。不记的话，一个被肩窥到或从截图里读到的验证码在 90 秒内可以
+ * 被反复使用。这张表要定期清理窗口之外的行（`pruneUsedSteps`）。
+ *
+ * 三张表都不按组织分区：第二因素属**账号**维度，一个账号可属多个组织（§9），
+ * 而「在 A 组织通过了 2FA、在 B 组织没有」不是一个说得通的状态。
+ */
+const migration010: Migration = {
+  version: 10,
+  name: 'second-factor',
+  statements: [
+    `CREATE TABLE second_factors (
+       factor_id    TEXT PRIMARY KEY,
+       account_id   TEXT NOT NULL REFERENCES accounts(account_id),
+       -- P0 只有 totp；webauthn 属 P4
+       kind         TEXT NOT NULL,
+       -- pending（已登记未验证）/ active / revoked
+       state        TEXT NOT NULL,
+       -- TOTP 共享密钥，Base32。**这是一个真正的秘密** —— 与备用码不同，
+       -- 它无法只存哈希：验码时要用它重算
+       secret       TEXT,
+       created_at   TEXT NOT NULL,
+       activated_at TEXT,
+       revoked_at   TEXT
+     ) STRICT`,
+    `CREATE INDEX idx_second_factors_account ON second_factors(account_id, state)`,
+
+    `CREATE TABLE recovery_codes (
+       account_id  TEXT NOT NULL REFERENCES accounts(account_id),
+       -- SHA-256。明文只在签发那一次出现过
+       code_hash   TEXT NOT NULL,
+       created_at  TEXT NOT NULL,
+       -- 消费即失效但**不删行**：审计要能回答哪张码在什么时候被用掉了
+       consumed_at TEXT,
+       -- 重新签发时作废旧的一批
+       revoked_at  TEXT
+     ) STRICT`,
+    `CREATE INDEX idx_recovery_codes_usable
+       ON recovery_codes(account_id, consumed_at, revoked_at)`,
+
+    `CREATE TABLE totp_used_steps (
+       account_id TEXT NOT NULL REFERENCES accounts(account_id),
+       step       INTEGER NOT NULL,
+       used_at    TEXT NOT NULL,
+       PRIMARY KEY (account_id, step)
+     ) STRICT`,
+    `CREATE INDEX idx_totp_used_steps_prune ON totp_used_steps(step)`,
+  ],
+}
+
 /** 全部迁移，按版本升序。新增迁移只能追加，不能修改既有条目。 */
 export const MIGRATIONS: readonly Migration[] = [
   migration001,
@@ -553,4 +734,9 @@ export const MIGRATIONS: readonly Migration[] = [
   migration003,
   migration004,
   migration005,
+  migration006,
+  migration007,
+  migration008,
+  migration009,
+  migration010,
 ]

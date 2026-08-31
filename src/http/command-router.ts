@@ -16,6 +16,17 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { ERROR_CATALOGUE, type ErrorCode } from '../contract/index.js'
 
+/**
+ * 请求守卫的判定。失败时直接给出完整响应。
+ *
+ * 之所以不复用 `CommandOutcome` 的错误码：`TIME_SKEW` 要按 §7.1 附带签名的
+ * 服务器时间与允许窗口，而那两个字段不该混进所有错误都用的统一信封。
+ */
+export type CommandGuard = (
+  request: IncomingMessage,
+  rawBody: Buffer,
+) => { readonly ok: true } | { readonly ok: false; readonly status: number; readonly body: unknown }
+
 /** 命令的执行上下文。认证结果由调用方注入，本文件不做认证。 */
 export interface CommandContext {
   readonly accountId: string
@@ -83,7 +94,8 @@ const MAX_BODY_BYTES = 1024 * 1024
  * 超过上限时**在读完之前**就中断 —— 先读完再判断等于让攻击者决定内存占用。
  */
 export async function readJsonBody(request: IncomingMessage): Promise<
-  { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly errorCode: ErrorCode }
+  | { readonly ok: true; readonly value: unknown; readonly raw: Buffer }
+  | { readonly ok: false; readonly errorCode: ErrorCode }
 > {
   const chunks: Buffer[] = []
   let total = 0
@@ -98,8 +110,12 @@ export async function readJsonBody(request: IncomingMessage): Promise<
     chunks.push(buffer)
   }
 
+  // 原始字节一并返回。§7.1 的签名覆盖请求体摘要，而摘要必须对**收到的字节**
+  // 取 —— 对 JSON.parse 之后再 stringify 的结果取会因键序、空格、数字表示的
+  // 差异而对不上，那种失配还极难定位
+  const raw = Buffer.concat(chunks)
   try {
-    return { ok: true, value: JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+    return { ok: true, value: JSON.parse(raw.toString('utf8')), raw }
   } catch {
     // schema 无效是终态错误，异步任务不得自动重试（§46）
     return { ok: false, errorCode: 'NOT_FOUND_OR_FORBIDDEN' }
@@ -138,6 +154,16 @@ export function isSameOriginWrite(
 export function commandHandler<T>(options: {
   readonly expectedOrigin: string
   readonly execute: (body: unknown, request: IncomingMessage) => Promise<CommandOutcome<T>>
+  /**
+   * 请求证明校验（§7.1）。在业务处理器之前跑，拿得到**原始请求体字节**。
+   *
+   * 放在这里而不是 `authenticate` 里，是因为签名覆盖请求体摘要，而
+   * `authenticate` 只拿得到 `IncomingMessage` —— 那时候 body 还没读。
+   *
+   * 失败时守卫自己给出完整响应而不是一个错误码：`TIME_SKEW` 按 §7.1 要带
+   * 服务器时间与允许窗口，那两个字段不属于统一错误信封。
+   */
+  readonly guard?: CommandGuard
 }): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
   return async (request, response) => {
     if (!isSameOriginWrite(request, options.expectedOrigin)) {
@@ -149,6 +175,14 @@ export function commandHandler<T>(options: {
     if (!body.ok) {
       writeJson(response, httpStatusOf(body.errorCode), errorBody(body.errorCode))
       return
+    }
+
+    if (options.guard !== undefined) {
+      const verdict = options.guard(request, body.raw)
+      if (!verdict.ok) {
+        writeJson(response, verdict.status, verdict.body)
+        return
+      }
     }
 
     let outcome: CommandOutcome<T>

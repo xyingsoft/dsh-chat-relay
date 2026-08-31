@@ -10,8 +10,22 @@
  *   DSH_CHAT_RELAY_HOST     监听地址，默认 127.0.0.1
  *   DSH_CHAT_RELAY_PORT     监听端口，默认 8787
  *   DSH_CHAT_RELAY_ORIGIN   允许的 host 来源，用于跨源判定
+ *   DSH_CHAT_RELAY_BOOTSTRAP_INVITE
+ *                           首个账号的引导邀请码。**仅在库里一条真实账号都
+ *                           没有时生效**，第一个人开完户就自动失效。见
+ *                           bootstrap.ts 关于那个死锁的说明
+ *   DSH_CHAT_RELAY_ALLOW_SHARED_SECRET_IDENTITY=1
+ *                           允许持有共享密钥的一方声称任意账号。**默认关闭**，
+ *                           开了会打警告。只给还没走注册流程的部署用
+ *   DSH_CHAT_RELAY_TLS_FINGERPRINT
+ *                           反向代理那张证书的公钥指纹（SHA-256，十六进制）。
+ *                           **配了才启用 §7.1 的请求证明校验** —— 本进程只听
+ *                           明文 HTTP，自己无从知道那张证书。不配会打警告
+ *   DSH_CHAT_RELAY_SKEW_MS  签名时间戳容忍窗口，毫秒。默认 300000（±5 分钟）
  */
 
+import { bootstrapInvite } from './bootstrap.js'
+import { ChatDatabase } from './storage/database.js'
 import { startRelay } from './server.js'
 
 const secret = process.env['DSH_CHAT_RELAY_SECRET']
@@ -39,12 +53,44 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
   process.exit(2)
 }
 
+// 引导要在 startRelay 之前跑完：relay 一起来就可能收到注册请求，
+// 那时候码必须已经在库里了
+const bootstrapCode = process.env['DSH_CHAT_RELAY_BOOTSTRAP_INVITE']
+if (bootstrapCode !== undefined && bootstrapCode.length > 0) {
+  const chat = ChatDatabase.open({ location: databasePath })
+  const outcome = bootstrapInvite(chat, { code: bootstrapCode, now: new Date() })
+  chat.close()
+  // 不打码本身 —— 它就在设它的人手里，进日志只是多一个泄露点
+  process.stdout.write(
+    outcome.kind === 'issued'
+      ? `引导邀请码已签发，组织 ${outcome.organizationId}，有效期至 ${outcome.expiresAt}
+`
+      : `引导邀请码未签发（${outcome.kind}）—— 这通常意味着已经有账号了，属正常。
+`,
+  )
+}
+
 const origin = process.env['DSH_CHAT_RELAY_ORIGIN']
+const allowSharedSecretIdentity = process.env['DSH_CHAT_RELAY_ALLOW_SHARED_SECRET_IDENTITY'] === '1'
+const tlsFingerprint = process.env['DSH_CHAT_RELAY_TLS_FINGERPRINT']
+const skewRaw = process.env['DSH_CHAT_RELAY_SKEW_MS']
+// 配了但不是正数就拒绝启动。悄悄回落到默认值的话，运维以为自己把窗口
+// 收紧到了 30 秒，实际还是 5 分钟
+if (skewRaw !== undefined && !(Number(skewRaw) > 0)) {
+  process.stderr.write(`DSH_CHAT_RELAY_SKEW_MS 不是正整数：${skewRaw}
+`)
+  process.exit(2)
+}
 const relay = await startRelay({
   databasePath,
   host,
   port,
   sharedSecret: secret,
+  allowSharedSecretIdentity,
+  ...(tlsFingerprint === undefined || tlsFingerprint.length === 0
+    ? {}
+    : { tlsFingerprint }),
+  ...(skewRaw === undefined ? {} : { skewToleranceMs: Number(skewRaw) }),
   ...(origin === undefined ? {} : { expectedOrigin: origin }),
 })
 

@@ -40,7 +40,7 @@ import {
 
 import type { ChatDatabaseService } from '../storage/database-port.js'
 
-import { commandHandler } from './command-router.js'
+import { commandHandler, type CommandGuard } from './command-router.js'
 import type { Principal } from './message-commands.js'
 
 export interface OrganizationCommandDeps {
@@ -49,6 +49,14 @@ export interface OrganizationCommandDeps {
   readonly authenticate: (request: IncomingMessage) => Principal | undefined
   readonly now: () => Date
   readonly newId: (prefix: string) => string
+  /**
+   * §7.1 的请求证明校验。没配 relay 指纹时为 undefined，届时不校验。
+   *
+   * 只挂业务端点。身份三件套是会话的**引导路径**：注册时还没有设备，
+   * refresh 根本不带 Bearer 头 —— 对它们要求签名等于要求「先有会话才能
+   * 建会话」。
+   */
+  readonly guard?: CommandGuard
 }
 
 /**
@@ -149,6 +157,7 @@ const MAX_NAME_LENGTH = 200
 export function createOrganizationHandler(deps: OrganizationCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -209,6 +218,7 @@ export function createOrganizationHandler(deps: OrganizationCommandDeps) {
 export function createWorkspaceHandler(deps: OrganizationCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -263,6 +273,7 @@ export function createWorkspaceHandler(deps: OrganizationCommandDeps) {
 export function createProjectHandler(deps: OrganizationCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -331,6 +342,7 @@ export function createProjectHandler(deps: OrganizationCommandDeps) {
 export function inviteMemberHandler(deps: OrganizationCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -394,6 +406,7 @@ export function inviteMemberHandler(deps: OrganizationCommandDeps) {
 export function acceptMembershipHandler(deps: OrganizationCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -465,6 +478,7 @@ export function acceptMembershipHandler(deps: OrganizationCommandDeps) {
 export function myMembershipsHandler(deps: OrganizationCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (_raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }

@@ -28,7 +28,7 @@ import {
 
 import type { ChatDatabaseService } from '../storage/database-port.js'
 
-import { commandHandler, type CommandOutcome } from './command-router.js'
+import { commandHandler, type CommandOutcome, type CommandGuard } from './command-router.js'
 
 /** 认证结果。本文件不做认证 —— 由上游的设备签名校验注入。 */
 export interface Principal {
@@ -59,6 +59,14 @@ export interface MessageCommandDeps {
    * 应该表现为「管理员撤不了别人的消息」，而不是「谁都能撤别人的消息」。
    */
   readonly authorizeCompliance?: (db: DatabaseSync, principal: Principal) => boolean
+  /**
+   * §7.1 的请求证明校验。没配 relay 指纹时为 undefined，届时不校验。
+   *
+   * 只挂业务端点。身份三件套是会话的**引导路径**：注册时还没有设备，
+   * refresh 根本不带 Bearer 头 —— 对它们要求签名等于要求「先有会话才能
+   * 建会话」。
+   */
+  readonly guard?: CommandGuard
 }
 
 interface SendBody {
@@ -99,6 +107,7 @@ function parseSendBody(value: unknown): SendBody | undefined {
 export function sendMessageHandler(deps: MessageCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request): Promise<CommandOutcome<{ deliverySeq: number }>> => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false, errorCode: 'UNAUTHENTICATED' }
@@ -175,6 +184,7 @@ export function sendMessageHandler(deps: MessageCommandDeps) {
 export function pullMessagesHandler(deps: MessageCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -208,6 +218,7 @@ export function pullMessagesHandler(deps: MessageCommandDeps) {
 export function ackMessagesHandler(deps: MessageCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -262,6 +273,7 @@ function validBody(value: unknown): value is string {
 export function editMessageHandler(deps: MessageCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -334,6 +346,7 @@ export function editMessageHandler(deps: MessageCommandDeps) {
 export function revokeMessageHandler(deps: MessageCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -411,6 +424,7 @@ export function revokeMessageHandler(deps: MessageCommandDeps) {
 export function conversationsHandler(deps: MessageCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }
@@ -443,6 +457,7 @@ export function conversationsHandler(deps: MessageCommandDeps) {
 export function messageHistoryHandler(deps: MessageCommandDeps) {
   return commandHandler({
     expectedOrigin: deps.expectedOrigin,
+    ...(deps.guard === undefined ? {} : { guard: deps.guard }),
     execute: async (raw, request) => {
       const principal = deps.authenticate(request)
       if (!principal) return { ok: false as const, errorCode: 'UNAUTHENTICATED' as const }

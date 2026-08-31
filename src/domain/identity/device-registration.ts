@@ -105,12 +105,13 @@ export function registerDevice(
 
   db.prepare(
     `INSERT INTO devices
-       (device_id, account_id, signing_public_key, agreement_public_key,
+       (device_id, account_id, device_name, signing_public_key, agreement_public_key,
         key_fingerprint, state, first_seen_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
   ).run(
     registration.deviceId,
     registration.accountId,
+    registration.deviceName,
     registration.signingPublicKey,
     registration.agreementPublicKey ?? null,
     fingerprint,
