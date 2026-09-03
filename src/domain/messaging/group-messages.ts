@@ -21,6 +21,7 @@ import {
 } from '../../contract/index.js'
 
 import { nextDeliverySeq, pendingDepth } from './delivery.js'
+import { groupInfoOf } from './groups.js'
 
 export interface AcceptGroupMessageInput {
   readonly messageId: string
@@ -177,4 +178,42 @@ export function acceptGroupMessage(
   }
 
   return { ok: true, recipients: rows.length, rows, idempotentReplay: false }
+}
+
+/**
+ * 一条消息的投递元数据（S4a：host 区分群/私聊并取群名）。
+ *
+ * host 拉队列时只拿得到 sender/body —— 要判断「这是群消息、群叫什么」，
+ * 得回到 messages 行看 `recipient_type`；group 时补查群名。
+ * 查不到该 (senderId, messageId) 行时返回 undefined（幂等留痕场景不应发生，
+ * 但调用方要能处理）。
+ */
+export type MessageDeliveryMeta =
+  | { readonly recipientType: 'account' }
+  | { readonly recipientType: 'group'; readonly groupId: string; readonly name: string }
+
+export function messageDeliveryMeta(input: {
+  readonly db: DatabaseSync
+  readonly organizationId: string
+  readonly senderId: string
+  readonly messageId: string
+}): MessageDeliveryMeta | undefined {
+  const row = input.db
+    .prepare(
+      `SELECT recipient_id AS recipientId, recipient_type AS recipientType
+         FROM messages
+        WHERE organization_id = ? AND sender_id = ? AND message_id = ?`,
+    )
+    .get(input.organizationId, input.senderId, input.messageId) as
+    | { recipientId: string; recipientType: string }
+    | undefined
+  if (row === undefined) return undefined
+  if (row.recipientType !== 'group') return { recipientType: 'account' }
+  const info = groupInfoOf({
+    db: input.db,
+    organizationId: input.organizationId,
+    groupId: row.recipientId,
+  })
+  if (info === undefined) return { recipientType: 'account' }
+  return { recipientType: 'group', groupId: info.groupId, name: info.name }
 }

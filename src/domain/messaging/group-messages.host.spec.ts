@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { acceptGroupMessage } from './group-messages.js'
+import { acceptGroupMessage, messageDeliveryMeta } from './group-messages.js'
 import { pendingDepth } from './delivery.js'
 
 let db: DatabaseSync
@@ -156,5 +156,32 @@ describe('组播入队', () => {
   it('空白正文被拒', () => {
     const result = sendFrom('jia', { body: '   ' })
     expect(result.ok).toBe(false)
+  })
+})
+
+describe('messageDeliveryMeta（S4a：host 识别群消息）', () => {
+  it('群消息返回 group 元数据（群 ID + 群名）', () => {
+    const sent = sendFrom('jia', { body: '群里的消息' })
+    expect(sent.ok).toBe(true)
+    const meta = messageDeliveryMeta({ db, organizationId: ORG, senderId: 'jia', messageId: 'gm-1' })
+    expect(meta).toEqual({ recipientType: 'group', groupId: GROUP, name: '三人行' })
+  })
+
+  it('私聊消息返回 account', () => {
+    db.prepare(
+      `INSERT INTO messages
+         (message_id, organization_id, sender_id, recipient_id, recipient_type,
+          kind, body, revision, created_at, received_at, operation_id,
+          event_format_version, encryption_meta)
+       VALUES ('dm-1', ?, 'jia', 'yi', 'account', 'text', '你好', 1, ?, ?, 'op', 1, '{}')`,
+    ).run(ORG, at.toISOString(), at.toISOString())
+    const meta = messageDeliveryMeta({ db, organizationId: ORG, senderId: 'jia', messageId: 'dm-1' })
+    expect(meta).toEqual({ recipientType: 'account' })
+  })
+
+  it('查不到的消息返回 undefined', () => {
+    expect(
+      messageDeliveryMeta({ db, organizationId: ORG, senderId: 'nobody', messageId: 'nope' }),
+    ).toBeUndefined()
   })
 })

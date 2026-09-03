@@ -127,3 +127,25 @@ export function groupsOf(input: {
     )
     .all(input.organizationId, input.accountId) as unknown as GroupRow[]
 }
+
+/** 群本体 + 成员数。host 拼会话列表（群名/人数）用的只读查询。 */
+export function groupInfoOf(input: {
+  readonly db: DatabaseSync
+  readonly organizationId: string
+  readonly groupId: string
+}): { readonly groupId: string; readonly name: string; readonly memberCount: number } | undefined {
+  const group = input.db
+    .prepare(
+      `SELECT group_id AS groupId, name AS name FROM groups
+        WHERE organization_id = ? AND group_id = ?`,
+    )
+    .get(input.organizationId, input.groupId) as
+    | { groupId: string; name: string }
+    | undefined
+  if (group === undefined) return undefined
+  return {
+    groupId: group.groupId,
+    name: group.name,
+    memberCount: groupMemberCount({ db: input.db, organizationId: input.organizationId, groupId: group.groupId }),
+  }
+}
