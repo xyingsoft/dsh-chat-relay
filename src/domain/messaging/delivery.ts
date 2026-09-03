@@ -52,7 +52,11 @@ export type AcceptMessageResult =
     }
 
 /** 未 ACK 的队列深度。容量判定只看未 ACK 项 —— 已 ACK 的记录保留但不占额度。 */
-function pendingDepth(db: DatabaseSync, organizationId: string, recipientId: string): number {
+export function pendingDepth(
+  db: DatabaseSync,
+  organizationId: string,
+  recipientId: string,
+): number {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM delivery_queue
@@ -63,7 +67,11 @@ function pendingDepth(db: DatabaseSync, organizationId: string, recipientId: str
 }
 
 /** 为收件人分区分配下一个 `DeliverySeq`，并推进该分区的高水位。 */
-function nextDeliverySeq(db: DatabaseSync, organizationId: string, recipientId: string): number {
+export function nextDeliverySeq(
+  db: DatabaseSync,
+  organizationId: string,
+  recipientId: string,
+): number {
   const partitionKey = `dm:${recipientId}`
   db.prepare(
     `INSERT INTO stream_state (organization_id, partition_key, stream_epoch, high_watermark)

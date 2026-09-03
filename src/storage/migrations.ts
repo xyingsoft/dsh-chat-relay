@@ -764,6 +764,23 @@ const migration011: Migration = {
   ],
 }
 
+/**
+ * 版本 12：P1 群消息最小标记（S3 前置）。
+ *
+ * `messages.recipient_type`：私聊为 `account`（缺省），群消息为 `group`
+ * （此时 `recipient_id` 是群 ID，不是账号 ID）。只做**扩展**（可空默认列），
+ * 不触碰既有查询 —— 私聊聚合按 sender/recipient 账号匹配，天然不会把
+ * `recipient_id = group-…` 的行并进 1v1 会话（§48 组织作用域已保证不跨组）。
+ */
+const migration012: Migration = {
+  version: 12,
+  name: 'p1-group-message-marker',
+  statements: [
+    `ALTER TABLE messages
+       ADD COLUMN recipient_type TEXT NOT NULL DEFAULT 'account'`,
+  ],
+}
+
 /** 全部迁移，按版本升序。新增迁移只能追加，不能修改既有条目。 */
 export const MIGRATIONS: readonly Migration[] = [
   migration001,
@@ -777,4 +794,5 @@ export const MIGRATIONS: readonly Migration[] = [
   migration009,
   migration010,
   migration011,
+  migration012,
 ]
