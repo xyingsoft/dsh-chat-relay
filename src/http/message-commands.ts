@@ -21,6 +21,7 @@ import {
   acknowledge,
   conversationsOf,
   editMessage,
+  groupConversationsOf,
   leaseBatch,
   messageDeliveryMeta,
   messagesWith,
@@ -452,9 +453,19 @@ export function conversationsHandler(deps: MessageCommandDeps) {
           ? Math.min(limitInput, 200)
           : 50
 
-      const conversations = deps.database.transaction((db) =>
-        conversationsOf(db, principal.organizationId, principal.accountId, { limit }),
-      )
+      // 私聊会话与群会话在同一响应里合并，按最后活动倒序（S4c）
+      const conversations = deps.database.transaction((db) => {
+        const direct = conversationsOf(db, principal.organizationId, principal.accountId, { limit })
+        const groups = groupConversationsOf({
+          db,
+          organizationId: principal.organizationId,
+          accountId: principal.accountId,
+          limit,
+        })
+        return [...direct, ...groups]
+          .sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1))
+          .slice(0, limit)
+      })
       return { ok: true as const, value: { conversations } }
     },
   })

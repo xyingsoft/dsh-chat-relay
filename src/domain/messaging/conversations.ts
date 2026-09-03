@@ -20,9 +20,13 @@ import type { DatabaseSync } from 'node:sqlite'
 import { REVOKED_PLACEHOLDER, messageView } from './message-events.js'
 
 export interface ConversationSummary {
-  /** 对端账号 ID。P0 的私聊里，会话就是对端。 */
+  /** 对端账号 ID；群会话时为群 ID。 */
   readonly peerId: string
   readonly peerDisplayName: string
+  /** P1 群聊：`group`；私聊缺省不写（客户端按 direct 处理）。 */
+  readonly kind?: 'direct' | 'group'
+  /** 群成员数（群会话时 host/客户端据此显示徽标）。 */
+  readonly memberCount?: number
   /** 最后一条消息的摘要。已撤回时是占位而非原文。 */
   readonly preview: string
   readonly lastActivityAt: string
