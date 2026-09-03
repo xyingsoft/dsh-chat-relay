@@ -22,6 +22,7 @@ import {
   conversationsOf,
   editMessage,
   leaseBatch,
+  messageDeliveryMeta,
   messagesWith,
   revokeMessage,
 } from '../domain/messaging/index.js'
@@ -194,16 +195,28 @@ export function pullMessagesHandler(deps: MessageCommandDeps) {
           ? Math.min(Math.max(1, (raw as { batchSize: number }).batchSize), 100)
           : 50
 
-      const items = deps.database.transaction((db) =>
-        leaseBatch(db, {
+      const items = deps.database.transaction((db) => {
+        const leased = leaseBatch(db, {
           organizationId: principal.organizationId,
           recipientId: principal.accountId,
           deviceId: principal.deviceId,
           batchSize,
           leaseMs: deps.leaseMs,
           now: deps.now(),
-        }),
-      )
+        })
+        // S4a-2：为群消息附带 `group` 上下文（群 ID + 群名）—— 加性字段，
+        // 私聊条目保持原样。host 由此区分「这是群消息、群叫什么」。
+        return leased.map((item) => {
+          const meta = messageDeliveryMeta({
+            db,
+            organizationId: principal.organizationId,
+            senderId: item.senderId,
+            messageId: item.messageId,
+          })
+          if (meta === undefined || meta.recipientType !== 'group') return item
+          return { ...item, group: { groupId: meta.groupId, name: meta.name } }
+        })
+      })
       return { ok: true as const, value: { items } }
     },
   })
