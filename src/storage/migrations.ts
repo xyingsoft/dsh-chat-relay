@@ -727,6 +727,43 @@ const migration010: Migration = {
   ],
 }
 
+/**
+ * 版本 11：P1 群聊最小模型（S1）。
+ *
+ * 两张表，都按组织分区（§48：任何派生/成员关系都带 `organization_id`）：
+ * - `groups`：群本体（组织内 group_id 唯一）
+ * - `group_members`：成员关系（同一组织内 (group_id, account_id) 唯一）
+ *
+ * 本版只承载「建群 / 加人 / 查成员」的最小闭环，供测试环境播种「甲乙联调群」；
+ * 群消息（组播投递）在 S3 之前不进入任何查询路径 —— 迁移只做**扩展**，
+ * 不触碰 messages / delivery_queue 的既有语义。
+ */
+const migration011: Migration = {
+  version: 11,
+  name: 'p1-group-minimal',
+  statements: [
+    `CREATE TABLE groups (
+       organization_id      TEXT NOT NULL,
+       group_id             TEXT NOT NULL,
+       name                 TEXT NOT NULL,
+       created_by_account_id TEXT NOT NULL,
+       created_at           TEXT NOT NULL,
+       PRIMARY KEY (organization_id, group_id)
+     ) STRICT`,
+    `CREATE INDEX idx_groups_name ON groups(organization_id, name)`,
+
+    `CREATE TABLE group_members (
+       organization_id TEXT NOT NULL,
+       group_id        TEXT NOT NULL,
+       account_id      TEXT NOT NULL REFERENCES accounts(account_id),
+       joined_at       TEXT NOT NULL,
+       PRIMARY KEY (organization_id, group_id, account_id)
+     ) STRICT`,
+    `CREATE INDEX idx_group_members_account
+       ON group_members(organization_id, account_id)`,
+  ],
+}
+
 /** 全部迁移，按版本升序。新增迁移只能追加，不能修改既有条目。 */
 export const MIGRATIONS: readonly Migration[] = [
   migration001,
@@ -739,4 +776,5 @@ export const MIGRATIONS: readonly Migration[] = [
   migration008,
   migration009,
   migration010,
+  migration011,
 ]
